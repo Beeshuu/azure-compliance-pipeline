@@ -206,6 +206,12 @@ resource "azurerm_role_assignment" "ci" {
   principal_type       = "ServicePrincipal"
 }
 
+resource "azurerm_role_assignment" "admin_state" {
+  scope                = azurerm_storage_container.tfstate.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
 resource "azurerm_role_assignment" "deploy_rbac_admin" {
   for_each             = local.delegable
   scope                = local.scopes[each.key]

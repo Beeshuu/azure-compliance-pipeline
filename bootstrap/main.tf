@@ -47,6 +47,16 @@ variable "github_repository" {
   }
 }
 
+variable "github_owner_id" {
+  description = "Numeric ID from: gh api repos/OWNER/NAME -q .owner.id"
+  type        = number
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID from: gh api repos/OWNER/NAME -q .id"
+  type        = number
+}
+
 variable "location" {
   type    = string
   default = "eastus2"
@@ -149,7 +159,7 @@ resource "azuread_application_federated_identity_credential" "ci" {
   display_name   = replace(each.key, "_", "-")
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:${var.github_repository}:${each.value.subject}"
+  subject        = "repo:${split("/", var.github_repository)[0]}@${var.github_owner_id}/${split("/", var.github_repository)[1]}@${var.github_repository_id}:${each.value.subject}"
 }
 
 locals {

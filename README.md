@@ -42,9 +42,12 @@ You need Terraform ≥ 1.11, the Azure CLI, the GitHub CLI, **Owner** on the sub
    ```bash
    az login
    cd bootstrap
+   gh api repos/your-org/azure-compliance-pipeline -q '"owner id: \(.owner.id)  repo id: \(.id)"'
    cat > terraform.tfvars <<'EOF'
-   subscription_id   = "00000000-0000-0000-0000-000000000000"
-   github_repository = "your-org/azure-compliance-pipeline"
+   subscription_id      = "00000000-0000-0000-0000-000000000000"
+   github_repository    = "your-org/azure-compliance-pipeline"
+   github_owner_id      = 0 # from the gh command above
+   github_repository_id = 0 # from the gh command above
    EOF
    terraform init && terraform apply
    ```

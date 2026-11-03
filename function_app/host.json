@@ -1,0 +1,14 @@
+{
+  "version": "2.0",
+  "logging": {
+    "logLevel": {
+      "default": "Warning",
+      "Function": "Information"
+    },
+    "applicationInsights": {
+      "samplingSettings": {
+        "excludedTypes": "Request;Trace;Exception"
+      }
+    }
+  }
+}

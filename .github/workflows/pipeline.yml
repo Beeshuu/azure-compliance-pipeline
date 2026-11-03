@@ -1,0 +1,161 @@
+name: pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'deploy-prod' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ARM_USE_OIDC: "true"
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_VAR_resource_group_name: ${{ vars.WORKLOAD_RESOURCE_GROUP }}
+  TF_VAR_plan_principal_id: ${{ vars.PLAN_PRINCIPAL_ID }}
+  TF_VAR_deploy_principal_id: ${{ vars.DEPLOY_PRINCIPAL_ID }}
+  TF_INPUT: "false"
+  TF_CLI_ARGS_init: >-
+    -backend-config=resource_group_name=${{ vars.TFSTATE_RESOURCE_GROUP }}
+    -backend-config=storage_account_name=${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+    -backend-config=container_name=${{ vars.TFSTATE_CONTAINER }}
+    -backend-config=key=compliance-pipeline.prod.tfstate
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: function_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest~=9.2 ruff~=0.17
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.17.0"
+          terraform_wrapper: false
+      - run: terraform fmt -check -recursive -diff
+      - run: |
+          for dir in bootstrap infra; do
+            terraform -chdir="$dir" init -backend=false
+            terraform -chdir="$dir" validate
+          done
+
+  plan:
+    needs: [test, validate]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+    outputs:
+      changes: ${{ steps.plan.outputs.changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.17.0"
+          terraform_wrapper: false
+      - run: terraform -chdir=infra init
+
+      - id: plan
+        run: |
+          set +e
+          terraform -chdir=infra plan -lock=false -detailed-exitcode -out=tfplan
+          code=$?
+          set -e
+          [ "$code" -eq 1 ] && exit 1
+          echo "changes=$([ "$code" -eq 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          terraform -chdir=infra show -no-color tfplan > plan.txt
+          cat plan.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request' && steps.plan.outputs.changes == 'true'
+        with:
+          name: tfplan
+          path: infra/tfplan
+          retention-days: 1
+
+      - if: always() && github.event_name == 'pull_request' && steps.plan.outcome != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan -->';
+            const plan = fs.existsSync('plan.txt') ? fs.readFileSync('plan.txt', 'utf8').slice(0, 60000) : 'Plan failed; see the workflow log.';
+            const icon = process.env.PLAN_OUTCOME === 'success' ? '✅' : '❌';
+            const body = `${marker}\n### ${icon} Terraform plan\n\n<details><summary>Show plan</summary>\n\n\`\`\`terraform\n${plan}\n\`\`\`\n</details>`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body?.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+  deploy:
+    needs: plan
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.17.0"
+          terraform_wrapper: false
+      - run: terraform -chdir=infra init
+
+      - if: needs.plan.outputs.changes == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: infra
+
+      - if: needs.plan.outputs.changes == 'true'
+        run: terraform -chdir=infra apply tfplan
+
+      - id: tf
+        run: echo "function_app_name=$(terraform -chdir=infra output -raw function_app_name)" >> "$GITHUB_OUTPUT"
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ steps.tf.outputs.function_app_name }}
+          package: function_app
+          sku: flex
+          remote-build: true

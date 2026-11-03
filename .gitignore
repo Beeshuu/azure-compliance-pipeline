@@ -1,0 +1,10 @@
+.terraform/
+*.tfstate*
+tfplan
+plan.txt
+bootstrap/terraform.tfvars
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
+local.settings.json

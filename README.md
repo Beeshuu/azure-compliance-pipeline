@@ -77,6 +77,7 @@ Set `enable_sentinel = true` in `infra/terraform.tfvars`.
 - **Public endpoints.** Key Vault and storage accept public traffic, but every request must be authenticated with Entra ID. GitHub-hosted runners need to reach them.
 - **Plan identity can read the secret.** It has Key Vault read access because Terraform refresh calls `GetSecret`. The one secret is the App Insights connection string, which can send telemetry but not read it.
 - **Saved plans contain sensitive attributes.** The artifact is kept for one day.
+- **Provider workaround.** azurerm 5.12 always writes an `AzureWebJobsStorage` connection string with an empty key on Flex apps. It overrides the managed-identity settings and breaks host storage, so the deploy job deletes it after every apply.
 
 ## Local development
 
